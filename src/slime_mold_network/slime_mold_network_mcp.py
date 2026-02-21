@@ -1134,7 +1134,11 @@ SLIME_MOLD_VISUAL_TYPES = {
             "minimal internal structure",
             "soft circular silhouette",
             "early-stage slime mold inoculation"
-        ]
+        ],
+        "optical": {"finish": "subsurface_scatter", "scatter": "diffuse_glow",
+                    "transparency": "translucent"},
+        "color_associations": ["pale amber", "soft yellow", "translucent cream",
+                               "faint bioluminescent green"]
     },
     "dendritic_explorer": {
         "coords": {
@@ -1152,7 +1156,11 @@ SLIME_MOLD_VISUAL_TYPES = {
             "irregular asymmetric sprawl",
             "high-energy exploration front",
             "Physarum pathfinding tentacles"
-        ]
+        ],
+        "optical": {"finish": "bioluminescent_wet", "scatter": "edge_glow",
+                    "transparency": "semi_translucent"},
+        "color_associations": ["bright yellow", "luminous gold",
+                               "electric yellow tips", "warm amber veins"]
     },
     "vein_lattice": {
         "coords": {
@@ -1170,7 +1178,11 @@ SLIME_MOLD_VISUAL_TYPES = {
             "shuttle-streaming protoplasmic flow",
             "optimized biological transport network",
             "Physarum polycephalum vein structure"
-        ]
+        ],
+        "optical": {"finish": "vascular_wet", "scatter": "directional_streaming",
+                    "transparency": "opaque_veins"},
+        "color_associations": ["deep yellow ochre", "dark amber veins",
+                               "golden transport channels", "warm brown network"]
     },
     "fractal_boundary": {
         "coords": {
@@ -1188,7 +1200,11 @@ SLIME_MOLD_VISUAL_TYPES = {
             "fractal dimension approaching 1.92",
             "complex perimeter at peak evolution",
             "intricate biological coastline"
-        ]
+        ],
+        "optical": {"finish": "matte_biological", "scatter": "edge_scatter",
+                    "transparency": "variable_translucency"},
+        "color_associations": ["variegated yellow", "fractal gold edge",
+                               "mottled amber boundary", "bright dendritic tips"]
     },
     "consolidated_mesh": {
         "coords": {
@@ -1206,7 +1222,11 @@ SLIME_MOLD_VISUAL_TYPES = {
             "mature NESS-state morphology",
             "equilibrium biological computation",
             "optimized slime mold steady-state"
-        ]
+        ],
+        "optical": {"finish": "dense_matte", "scatter": "minimal_scatter",
+                    "transparency": "opaque"},
+        "color_associations": ["dark mature yellow", "dense ochre mesh",
+                               "brownish consolidated mass", "muted amber lattice"]
     }
 }
 
@@ -1724,6 +1744,258 @@ def generate_slime_mold_sequence_prompts(
     }
 
 
+# ============================================================================
+# PHASE 2.8: AESTHETIC DECOMPOSITION — description → 5D coordinates
+# ============================================================================
+# Inverse of the generative pipeline: text description → domain coordinates.
+# Completes the round-trip: coordinates → prompt → image → description → coords.
+# Layer 2: deterministic, 0 LLM tokens.
+
+import re as _re
+import math as _math
+
+_DECOMPOSE_STOP_WORDS = frozenset({
+    'a', 'an', 'the', 'in', 'on', 'at', 'to', 'of', 'for', 'with',
+    'by', 'from', 'and', 'or', 'but', 'as', 'is', 'are', 'was', 'were',
+    'be', 'been', 'being', 'has', 'have', 'had', 'do', 'does', 'did',
+    'no', 'not', 'all', 'its', 'this', 'that', 'into', 'over',
+})
+
+
+def _decompose_tokenize(text: str):
+    """Tokenize input text into word set + lowercased full text."""
+    lower = text.lower()
+    words = set(_re.findall(r'[a-z]+(?:-[a-z]+)*', lower))
+    return words, lower
+
+
+def _decompose_extract_fragments(keyword: str) -> List[str]:
+    """Extract matchable sub-phrases from a keyword string.
+
+    Sliding window of 2-4 words + full keyword. Skips stop-word-only frags.
+    """
+    words = keyword.lower().split()
+    fragments = []
+    if len(words) >= 3:
+        fragments.append(keyword.lower())
+    for window_size in [4, 3, 2]:
+        for i in range(len(words) - window_size + 1):
+            frag = ' '.join(words[i:i + window_size])
+            content_words = [w for w in words[i:i + window_size]
+                             if len(w) > 3 and w not in _DECOMPOSE_STOP_WORDS]
+            if content_words:
+                fragments.append(frag)
+    return fragments
+
+
+def _decompose_score_visual_type(
+    type_def: dict,
+    words: set,
+    full_text: str,
+    sub_w: float = 1.0,
+    word_w: float = 0.3,
+    opt_w: float = 0.5,
+    color_w: float = 0.4,
+) -> tuple:
+    """Score a single visual type against input text. Returns (score, matches)."""
+    score = 0.0
+    matched = []
+
+    # Keyword fragment matching
+    for keyword in type_def.get("keywords", []):
+        fragments = _decompose_extract_fragments(keyword)
+        best_s, best_f = 0.0, None
+        for frag in fragments:
+            if frag in full_text:
+                if sub_w > best_s:
+                    best_s, best_f = sub_w, frag
+            else:
+                frag_words = set(frag.split()) - _DECOMPOSE_STOP_WORDS
+                if frag_words:
+                    overlap = len(frag_words & words) / len(frag_words)
+                    ws = overlap * word_w
+                    if ws > best_s:
+                        best_s, best_f = ws, frag
+        if best_f and best_s > 0:
+            score += best_s
+            matched.append(best_f)
+
+    # Optical property matching
+    for prop_name, prop_value in type_def.get("optical", {}).items():
+        prop_words = set(prop_value.lower().replace('_', ' ').split())
+        prop_overlap = len(prop_words & words)
+        if prop_overlap > 0:
+            score += opt_w * (prop_overlap / len(prop_words))
+            matched.append(f"optical:{prop_value}")
+
+    # Color association matching
+    for color in type_def.get("color_associations", []):
+        color_lower = color.lower()
+        if color_lower in full_text:
+            score += color_w
+            matched.append(f"color:{color}")
+        else:
+            color_words = set(color_lower.split()) - _DECOMPOSE_STOP_WORDS
+            if color_words:
+                overlap = len(color_words & words)
+                if overlap > 0:
+                    score += color_w * 0.5 * (overlap / len(color_words))
+
+    return score, matched
+
+
+def _decompose_slime_mold(description: str) -> Dict[str, Any]:
+    """Core decomposition: text description → 5D slime mold coordinates.
+
+    Layer 2: deterministic, 0 LLM tokens.
+
+    Algorithm:
+      1. Tokenize description
+      2. Score each visual type by keyword/optical/color matching
+      3. Softmax-blend type centers → recovered coordinates
+      4. Compute confidence from max score vs max possible
+      5. Return coordinates + metadata
+    """
+    words, full_text = _decompose_tokenize(description)
+
+    # Score each visual type
+    type_scores = {}
+    all_matched = []
+    for type_id, type_def in SLIME_MOLD_VISUAL_TYPES.items():
+        score, matched = _decompose_score_visual_type(type_def, words, full_text)
+        type_scores[type_id] = score
+        all_matched.extend(matched)
+
+    max_score = max(type_scores.values()) if type_scores else 0
+    # Max possible: ~7 keywords × 1.0 + 3 optical × 0.5 + 4 colors × 0.4 = 10.1
+    max_possible = 10.1
+    confidence = min(1.0, max_score / max_possible) if max_possible > 0 else 0.0
+
+    # Below threshold → domain not detected
+    if confidence < 0.05:
+        return {
+            "detected": False,
+            "coordinates": {p: 0.5 for p in SLIME_MOLD_PARAMETER_NAMES},
+            "confidence": 0.0,
+            "nearest_type": "",
+            "type_scores": type_scores,
+        }
+
+    # Softmax blend coordinates (temperature=1.5)
+    temp = 1.5
+    max_s = max(type_scores.values())
+    exps = {k: _math.exp((v - max_s) / temp) for k, v in type_scores.items()}
+    total_exp = sum(exps.values())
+    weights = {k: v / total_exp for k, v in exps.items()}
+
+    coords = {p: 0.0 for p in SLIME_MOLD_PARAMETER_NAMES}
+    for type_id, w in weights.items():
+        if w > 0:
+            center = SLIME_MOLD_VISUAL_TYPES[type_id]["coords"]
+            for p in SLIME_MOLD_PARAMETER_NAMES:
+                coords[p] += w * center.get(p, 0)
+
+    # Round coordinates
+    coords = {p: round(v, 4) for p, v in coords.items()}
+
+    # Nearest type
+    nearest_type = max(type_scores, key=type_scores.get)
+    nearest_center = SLIME_MOLD_VISUAL_TYPES[nearest_type]["coords"]
+    nearest_dist = _math.sqrt(sum(
+        (coords.get(p, 0) - nearest_center.get(p, 0)) ** 2
+        for p in SLIME_MOLD_PARAMETER_NAMES
+    ))
+
+    # Separate matched fragments from optical/color
+    optical_matches = {}
+    color_matches = []
+    keyword_matches = []
+    for m in all_matched:
+        if m.startswith("optical:"):
+            val = m.split(":", 1)[1]
+            optical_matches[val] = True
+        elif m.startswith("color:"):
+            color_matches.append(m.split(":", 1)[1])
+        else:
+            if m not in keyword_matches:
+                keyword_matches.append(m)
+
+    return {
+        "detected": True,
+        "coordinates": coords,
+        "confidence": round(confidence, 4),
+        "nearest_type": nearest_type,
+        "nearest_type_distance": round(nearest_dist, 4),
+        "type_scores": {k: round(v, 3) for k, v in type_scores.items()},
+        "type_weights": {k: round(v, 4) for k, v in weights.items()},
+        "matched_fragments": keyword_matches[:10],
+        "optical_matches": list(optical_matches.keys()),
+        "color_matches": color_matches,
+    }
+
+
+@mcp.tool()
+def decompose_slime_mold_from_description(description: str) -> Dict[str, Any]:
+    """
+    Decompose a text description into slime mold 5D coordinates.
+
+    Layer 2: Deterministic keyword matching (0 LLM tokens).
+
+    Inverse of the generative pipeline: takes an image description
+    (from Claude vision, user text, or any aesthetic description)
+    and recovers the slime mold morphological coordinates that would
+    produce similar visual vocabulary.
+
+    Algorithm:
+      1. Tokenize description into words and bigrams
+      2. Score each visual type by keyword fragment matching,
+         optical property overlap, and color association hits
+      3. Softmax-blend type center coordinates (temperature=1.5)
+      4. Return recovered 5D coordinates with confidence
+
+    Confidence is NOT "how good the image is" — it's "how much
+    slime mold visual vocabulary is present in the description."
+
+    Args:
+        description: Image description text or aesthetic description.
+            Examples:
+            - "translucent amoeboid mass with faint bioluminescent glow"
+            - "hierarchical vein network with branching transport channels"
+            - "fractal dendritic boundary with self-similar edge detail"
+            - "dense anastomosing network mesh at steady state"
+
+    Returns:
+        Recovered 5D coordinates, confidence, nearest visual type,
+        matched fragments, and scoring metadata.
+
+    Cost: 0 tokens (pure Layer 2 deterministic computation)
+    """
+    if not description or not description.strip():
+        return {"error": "Empty description", "usage": "Provide text describing a slime mold aesthetic"}
+
+    result = _decompose_slime_mold(description)
+
+    return {
+        "domain": "slime_mold_network",
+        "phase": "2.8",
+        "description_length": len(description),
+        "detected": result["detected"],
+        "coordinates": result["coordinates"],
+        "confidence": result.get("confidence", 0.0),
+        "nearest_type": result.get("nearest_type", ""),
+        "nearest_type_distance": result.get("nearest_type_distance", 0.0),
+        "type_scores": result.get("type_scores", {}),
+        "type_weights": result.get("type_weights", {}),
+        "matched_fragments": result.get("matched_fragments", []),
+        "optical_matches": result.get("optical_matches", []),
+        "color_matches": result.get("color_matches", []),
+        "parameter_names": SLIME_MOLD_PARAMETER_NAMES,
+        "methodology": "phase_2_8_aesthetic_decomposition",
+        "algorithm": "keyword_fragment_matching_softmax_blend",
+        "llm_cost": "0 tokens",
+    }
+
+
 @mcp.tool()
 def get_slime_mold_server_info() -> Dict[str, Any]:
     """
@@ -1733,7 +2005,7 @@ def get_slime_mold_server_info() -> Dict[str, Any]:
     """
     return {
         "server": "slime-mold-network",
-        "version": "2.7.0",
+        "version": "2.8.0",
         "description": "Morphological computation aesthetics based on Physarum polycephalum",
         "research_basis": "Bajpai et al. (2025)",
         "layer_architecture": {
@@ -1767,6 +2039,16 @@ def get_slime_mold_server_info() -> Dict[str, Any]:
             "visual_types": list(SLIME_MOLD_VISUAL_TYPES.keys()),
             "prompt_modes": ["composite", "split_view"],
             "sequence_prompts": True
+        },
+        "phase_2_8_enhancements": {
+            "aesthetic_decomposition": True,
+            "description": "Text description → 5D coordinate recovery",
+            "algorithm": "keyword_fragment_matching_softmax_blend",
+            "visual_types_enriched": True,
+            "optical_properties_added": True,
+            "color_associations_added": True,
+            "tool": "decompose_slime_mold_from_description",
+            "cost": "0 tokens (Layer 2 deterministic)"
         },
         "compositional_integration": {
             "ready_for_tier_4d": True,
